@@ -213,3 +213,12 @@ test('search refuses an unresolvable source instead of creating unverifiable evi
   )
   sessionQuery.readEvent = originalReadEvent
 })
+
+test('search refuses a source event that does not match the hit identity', async () => {
+  const { ledger, sessionQuery, events } = createFixture()
+  sessionQuery.readEvent = async () => ({ ...events[0], event_seq: 99 })
+  await assert.rejects(
+    ledger.searchEvidence({ workspaceId: 'workspace-a', query: 'rollback' }),
+    (error) => error instanceof LedgerError && error.code === 'evidence_changed',
+  )
+})

@@ -106,7 +106,13 @@ export class SessionLedger {
         throw new LedgerError('source_unavailable', `event ${hit.sessionId}:${hit.eventSeq} could not be read`, { hit })
       }
       const event = normalizeEvent(rawEvent, hit)
-      if (event.workspaceId !== workspaceId) continue
+      if (
+        event.workspaceId !== workspaceId
+        || event.sessionId !== hit.sessionId
+        || event.eventSeq !== hit.eventSeq
+      ) {
+        throw new LedgerError('evidence_changed', `search hit ${hit.sessionId}:${hit.eventSeq} resolved to a different event`, { hit })
+      }
       const contentHash = sha256(event.text)
       evidence.push({
         workspaceId,
