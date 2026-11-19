@@ -147,10 +147,17 @@ type CandidateRecord = {
   evidence: EvidenceRef[]
   createdAt: string
   expiresAt: string
+  pendingConfirmation?: {
+    confirmationId: string
+    issuedAt: string
+  }
   confirmation?: {
     tokenId: string
+    confirmationId?: string
+    issuedAt?: string
     confirmedAt: string
     confirmedTextHash: string
+    consumedAt?: string
   }
 }
 ```
@@ -172,6 +179,8 @@ type MemoryRecord = {
   schemaVersion: 1
 }
 ```
+
+M5 在晋升前重新读取每个 `EvidenceRef`，验证 workspace、session、事件序号、内容哈希，以及候选记录存在时的 `eventTime` 和 `sourceGeneration`。来源不可读、身份改变、版本改变或授权失效都会阻止晋升。
 
 第一版不保存 `numeric relevance score`，因为官方 `sessionQuery` 的跨会话结果契约不把具体分数作为稳定 API；账本展示结果顺序、匹配片段和来源即可。
 
@@ -253,7 +262,9 @@ interface SessionLedger {
 
 查询分页游标由官方 provider 管理；插件不解析或持久化 provider 私有游标。若 corpus generation 变化导致游标失效，重新开始查询并向调用方返回 `cursor_invalidated`。
 
-晋升按 `candidate_id` 幂等。两个并发 promote 请求最多产生一条 MemoryRecord；一旦候选进入 `PROMOTED`，重复请求返回已有记录。
+每次签发确认都会生成新的 `confirmationId`，并绑定候选 ID、workspace、候选文本哈希、证据哈希、来源版本和过期时间；重新签发会使旧 token 失效。晋升按 `candidate_id` 在 Host 进程内串行化，成功后记录 `consumedAt`。两个并发 promote 请求最多产生一条 MemoryRecord；一旦候选进入 `PROMOTED`，重试只返回已有记录，不创建副本。
+
+Memory 使用独立的生命周期转换：`ACTIVE -> REVOKED -> DELETED`，或 `ACTIVE -> DELETED`。删除会清空正文和证据，已删除记忆不能再次撤销。
 
 ## 10. 性能验收
 

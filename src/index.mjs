@@ -1,6 +1,6 @@
 export { LedgerError } from './errors.mjs'
 export { SessionLedger, createSessionLedger } from './session-ledger.mjs'
 export { InMemoryLedgerStore } from './store.mjs'
-export { candidateTransitions, transitionCandidate } from './state-machine.mjs'
+export { candidateTransitions, memoryTransitions, transitionCandidate, transitionMemory } from './state-machine.mjs'
 export { redactSensitiveText, limitText } from './redact.mjs'
 export { createSessionLedgerConfirmationService, dismissLabel, saveLabel } from './confirmation.mjs'

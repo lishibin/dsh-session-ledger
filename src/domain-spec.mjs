@@ -21,10 +21,17 @@ const candidateSchema = z.object({
   evidence: z.array(evidenceSchema),
   createdAt: z.string(),
   expiresAt: z.string(),
+  pendingConfirmation: z.object({
+    confirmationId: z.string(),
+    issuedAt: z.string(),
+  }).optional(),
   confirmation: z.object({
     tokenId: z.string(),
+    confirmationId: z.string().optional(),
+    issuedAt: z.string().optional(),
     confirmedAt: z.string(),
     confirmedTextHash: z.string(),
+    consumedAt: z.string().optional(),
   }).optional(),
 })
 
