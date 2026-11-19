@@ -1,0 +1,4 @@
+bench/fixtures/*.jsonl
+bench/fixtures/*.json
+bench/results/
+node_modules/

@@ -1,0 +1,77 @@
+{
+  "name": "dsh-session-ledger",
+  "version": "0.1.0",
+  "description": "Design and benchmarks for a provenance-aware DeepSeek Harness memory plugin",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "memory",
+    "session-query"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lishibin/dsh-session-ledger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lishibin/dsh-session-ledger/issues"
+  },
+  "homepage": "https://github.com/lishibin/dsh-session-ledger#readme",
+  "type": "module",
+  "main": "src/plugin.mjs",
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "docs",
+    "scripts"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=18",
+    "dsh": ">=0.2.2-rc.4 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-session-query": ">=0.0.1-rc.1 <0.1.0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.0.1-rc.1 <0.1.0",
+    "@deepseek-ai/dsh-user-questions": ">=0.0.1-rc.1 <0.1.0",
+    "@deepseek-ai/schemastery": ">=3.18.1-rc.1 <4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-session-query": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-storage-domain": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-questions": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "scripts": {
+    "bench:generate": "node bench/generate-fixture.mjs",
+    "bench": "node bench/run-baseline.mjs",
+    "bench:m4": "node bench/run-m4.mjs",
+    "bench:append": "node bench/append-fixture.mjs",
+    "check": "node bench/check-fixture.mjs",
+    "test": "node --test",
+    "smoke:host": "node scripts/host-smoke.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1-rc.1",
+    "@deepseek-ai/dsh-invariants": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-storage": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-storage-domain": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-storage-json": "0.0.1-rc.1"
+  }
+}
