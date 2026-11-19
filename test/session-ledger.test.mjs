@@ -81,6 +81,39 @@ test('candidate requires confirmation and promotion is idempotent', async () => 
   assert.equal((await ledger.listMemories({ workspaceId: 'workspace-a' })).length, 1)
 })
 
+test('concurrent promotion is serialized and creates one memory', async () => {
+  const { ledger } = createFixture()
+  const evidence = (await ledger.searchEvidence({ workspaceId: 'workspace-a', query: 'rollback' })).items
+  const candidate = await ledger.createCandidate({
+    workspaceId: 'workspace-a',
+    proposedText: 'Use the previous image when deployment rollback is required.',
+    evidence,
+  })
+  const confirmation = await ledger.issueConfirmation(candidate.id)
+  const [first, second] = await Promise.all([
+    ledger.promote(candidate.id, confirmation.token),
+    ledger.promote(candidate.id, confirmation.token),
+  ])
+  assert.equal(first.id, second.id)
+  assert.equal((await ledger.listMemories({ workspaceId: 'workspace-a' })).length, 1)
+})
+
+test('a newly issued confirmation invalidates the previous token', async () => {
+  const { ledger } = createFixture()
+  const evidence = (await ledger.searchEvidence({ workspaceId: 'workspace-a', query: 'rollback' })).items
+  const candidate = await ledger.createCandidate({ workspaceId: 'workspace-a', proposedText: 'Keep the previous image.', evidence })
+  const first = await ledger.issueConfirmation(candidate.id)
+  const second = await ledger.issueConfirmation(candidate.id)
+  await assert.rejects(
+    ledger.promote(candidate.id, first.token),
+    (error) => error instanceof LedgerError && error.code === 'invalid_confirmation',
+  )
+  const memory = await ledger.promote(candidate.id, second.token)
+  assert.equal(memory.status, 'active')
+  const promoted = await ledger.getCandidate(candidate.id)
+  assert.equal(promoted.confirmation.consumedAt !== undefined, true)
+})
+
 test('confirmation cannot be reused after evidence changes', async () => {
   const { ledger, events } = createFixture()
   const evidence = (await ledger.searchEvidence({ workspaceId: 'workspace-a', query: 'rollback' })).items
@@ -91,6 +124,35 @@ test('confirmation cannot be reused after evidence changes', async () => {
     ledger.promote(candidate.id, confirmation.token),
     (error) => error instanceof LedgerError && error.code === 'evidence_changed',
   )
+})
+
+test('promotion revalidates source identity, timestamp, and generation', async () => {
+  const { ledger, events } = createFixture()
+  events[0].source_generation = 'generation-1'
+  const evidence = (await ledger.searchEvidence({ workspaceId: 'workspace-a', query: 'rollback' })).items
+  const candidate = await ledger.createCandidate({ workspaceId: 'workspace-a', proposedText: 'Keep the previous image.', evidence })
+  const confirmation = await ledger.issueConfirmation(candidate.id)
+  events[0].source_generation = 'generation-2'
+  await assert.rejects(
+    ledger.promote(candidate.id, confirmation.token),
+    (error) => error instanceof LedgerError && error.code === 'evidence_changed',
+  )
+})
+
+test('expired candidates are persisted as terminal state', async () => {
+  const { ledger } = createFixture()
+  const evidence = (await ledger.searchEvidence({ workspaceId: 'workspace-a', query: 'rollback' })).items
+  const candidate = await ledger.createCandidate({
+    workspaceId: 'workspace-a',
+    proposedText: 'Keep the previous image.',
+    evidence,
+    expiresAt: '2026-01-01T00:00:00.000Z',
+  })
+  await assert.rejects(
+    ledger.issueConfirmation(candidate.id),
+    (error) => error instanceof LedgerError && error.code === 'candidate_expired',
+  )
+  assert.equal((await ledger.getCandidate(candidate.id)).state, 'expired')
 })
 
 test('candidate evidence cannot cross workspaces and secrets are redacted', async () => {
@@ -128,6 +190,10 @@ test('revoke and delete preserve auditable metadata while removing content', asy
   assert.deepEqual(deleted.evidence, [])
   assert.equal((await ledger.listMemories({ workspaceId: 'workspace-a' })).length, 0)
   assert.equal((await ledger.listMemories({ workspaceId: 'workspace-a', includeDeleted: true })).length, 1)
+  await assert.rejects(
+    ledger.revoke(memory.id),
+    (error) => error instanceof LedgerError && error.code === 'invalid_state',
+  )
 })
 
 test('health reports storage and query readiness', async () => {

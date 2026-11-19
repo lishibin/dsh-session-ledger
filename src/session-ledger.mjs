@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { LedgerError } from './errors.mjs'
 import { canonicalEvidence, evidenceHash, hmacSha256, safeEqual, sha256 } from './hash.mjs'
 import { limitText, redactSensitiveText } from './redact.mjs'
-import { transitionCandidate } from './state-machine.mjs'
+import { transitionCandidate, transitionMemory } from './state-machine.mjs'
 
 const candidateTable = 'candidates'
 const memoryTable = 'memories'
@@ -60,6 +60,8 @@ function assertWorkspace(workspaceId) {
 }
 
 export class SessionLedger {
+  #promotionLocks = new Map()
+
   constructor({ store, sessionQuery, confirmationSecret, now = Date.now, candidateTtlMs = defaultCandidateTtlMs }) {
     if (!store || typeof store.get !== 'function' || typeof store.put !== 'function') {
       throw new LedgerError('invalid_store', 'store must implement get() and put()')
@@ -131,8 +133,11 @@ export class SessionLedger {
     return structuredClone(await this.#getCandidate(candidateId))
   }
 
-  #assertCandidateNotExpired(candidate) {
+  async #assertCandidateNotExpired(candidate) {
     if (Date.parse(candidate.expiresAt) <= this.now() && !['promoted', 'dismissed', 'expired'].includes(candidate.state)) {
+      const expired = transitionCandidate(candidate, 'expired')
+      await this.store.put(candidateTable, candidate.id, expired)
+      await this.#audit('candidate.expired', candidate.id, candidate.workspaceId)
       throw new LedgerError('candidate_expired', `candidate ${candidate.id} has expired`, { candidateId: candidate.id })
     }
   }
@@ -180,11 +185,16 @@ export class SessionLedger {
 
   async issueConfirmation(candidateId) {
     const candidate = await this.#getCandidate(candidateId)
-    this.#assertCandidateNotExpired(candidate)
+    await this.#assertCandidateNotExpired(candidate)
     if (!['discovered', 'presented'].includes(candidate.state)) {
       throw new LedgerError('invalid_state', `candidate ${candidateId} is ${candidate.state}`)
     }
-    const presented = transitionCandidate(candidate, 'presented')
+    const confirmationId = randomUUID()
+    const pendingConfirmation = {
+      confirmationId,
+      issuedAt: nowIso(this.now),
+    }
+    const presented = transitionCandidate({ ...candidate, pendingConfirmation }, 'presented')
     await this.store.put(candidateTable, candidateId, presented)
     const payload = {
       v: 1,
@@ -192,6 +202,7 @@ export class SessionLedger {
       workspaceId: candidate.workspaceId,
       proposedTextHash: candidate.proposedTextHash,
       evidenceHash: evidenceHash(candidate.evidence),
+      confirmationId,
       expiresAt: candidate.expiresAt,
     }
     const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
@@ -212,14 +223,17 @@ export class SessionLedger {
     } catch {
       throw new LedgerError('invalid_confirmation', 'confirmation token payload is invalid')
     }
+    const expectedConfirmationId = candidate.pendingConfirmation?.confirmationId ?? candidate.confirmation?.confirmationId
     if (
       payload.v !== 1 || payload.candidateId !== candidate.id || payload.workspaceId !== candidate.workspaceId
+      || !expectedConfirmationId || payload.confirmationId !== expectedConfirmationId
       || !safeEqual(payload.proposedTextHash, candidate.proposedTextHash)
       || !safeEqual(payload.evidenceHash, evidenceHash(candidate.evidence))
       || Date.parse(payload.expiresAt) <= this.now()
     ) {
       throw new LedgerError('invalid_confirmation', 'confirmation token does not match current candidate')
     }
+    return payload
   }
 
   async #verifyEvidence(candidate) {
@@ -229,32 +243,54 @@ export class SessionLedger {
         seq: item.eventSeq,
         workspaceId: candidate.workspaceId,
       })
+      if (!rawEvent) {
+        throw new LedgerError('source_unavailable', `event ${item.sessionId}:${item.eventSeq} could not be read`, { evidence: item })
+      }
       const event = normalizeEvent(rawEvent, item)
       if (event.workspaceId !== candidate.workspaceId) throw new LedgerError('workspace_forbidden', 'evidence is no longer authorized')
+      if (event.sessionId !== item.sessionId || event.eventSeq !== Number(item.eventSeq)) {
+        throw new LedgerError('evidence_changed', `evidence ${item.sessionId}:${item.eventSeq} no longer identifies the same event`, { evidence: item })
+      }
+      if (item.eventTime && event.eventTime && event.eventTime !== item.eventTime) {
+        throw new LedgerError('evidence_changed', `evidence ${item.sessionId}:${item.eventSeq} timestamp changed`, { evidence: item })
+      }
+      if (item.sourceGeneration !== undefined && event.sourceGeneration !== item.sourceGeneration) {
+        throw new LedgerError('evidence_changed', `evidence ${item.sessionId}:${item.eventSeq} source version changed`, { evidence: item })
+      }
       if (!safeEqual(sha256(event.text), item.contentHash)) {
         throw new LedgerError('evidence_changed', `evidence ${item.sessionId}:${item.eventSeq} changed`, { evidence: item })
       }
     }
   }
 
-  async promote(candidateId, token, { kind = 'other' } = {}) {
+  async #promote(candidateId, token, { kind = 'other' } = {}) {
     const candidate = await this.#getCandidate(candidateId)
     if (candidate.state === 'promoted') {
       return this.store.get(memoryTable, `memory-${candidate.id}`)
     }
-    this.#assertCandidateNotExpired(candidate)
+    await this.#assertCandidateNotExpired(candidate)
     if (!['presented', 'confirmed'].includes(candidate.state)) {
       throw new LedgerError('invalid_state', `candidate ${candidateId} is ${candidate.state}`)
     }
     if (!memoryKinds.has(kind)) throw new LedgerError('invalid_input', `unknown memory kind: ${kind}`)
-    this.#decodeConfirmation(token, candidate)
+    const confirmationPayload = this.#decodeConfirmation(token, candidate)
+    const tokenId = sha256(token).slice(0, 16)
+    if (candidate.state === 'confirmed' && candidate.confirmation?.consumedAt) {
+      throw new LedgerError('confirmation_replayed', 'confirmation token has already been consumed', { candidateId })
+    }
+    if (candidate.state === 'confirmed' && candidate.confirmation?.tokenId !== tokenId) {
+      throw new LedgerError('invalid_confirmation', 'confirmation token does not match the confirmed candidate')
+    }
     await this.#verifyEvidence(candidate)
 
     const confirmed = candidate.state === 'confirmed' ? candidate : transitionCandidate(candidate, 'confirmed')
+    const { pendingConfirmation, ...withoutPendingConfirmation } = confirmed
     const confirmedRecord = {
-      ...confirmed,
+      ...withoutPendingConfirmation,
       confirmation: {
-        tokenId: sha256(token).slice(0, 16),
+        tokenId,
+        confirmationId: confirmationPayload.confirmationId,
+        ...(pendingConfirmation?.issuedAt ? { issuedAt: pendingConfirmation.issuedAt } : {}),
         confirmedAt: nowIso(this.now),
         confirmedTextHash: candidate.proposedTextHash,
       },
@@ -262,7 +298,14 @@ export class SessionLedger {
     await this.store.put(candidateTable, candidate.id, confirmedRecord)
     const memoryId = `memory-${candidate.id}`
     const existing = await this.store.get(memoryTable, memoryId)
-    if (existing) return existing
+    if (existing) {
+      const completed = transitionCandidate({
+        ...confirmedRecord,
+        confirmation: { ...confirmedRecord.confirmation, consumedAt: existing.promotedAt ?? nowIso(this.now) },
+      }, 'promoted')
+      await this.store.put(candidateTable, candidate.id, completed)
+      return structuredClone(existing)
+    }
     const memory = {
       id: memoryId,
       workspaceId: candidate.workspaceId,
@@ -276,14 +319,31 @@ export class SessionLedger {
       schemaVersion: 1,
     }
     await this.store.put(memoryTable, memory.id, memory)
-    await this.store.put(candidateTable, candidate.id, transitionCandidate({ ...confirmedRecord, state: 'confirmed' }, 'promoted'))
+    await this.store.put(candidateTable, candidate.id, transitionCandidate({
+      ...confirmedRecord,
+      confirmation: { ...confirmedRecord.confirmation, consumedAt: nowIso(this.now) },
+    }, 'promoted'))
     await this.#audit('memory.promoted', memory.id, memory.workspaceId, { candidateId: candidate.id, kind })
     return structuredClone(memory)
   }
 
+  async promote(candidateId, token, options = {}) {
+    const previous = this.#promotionLocks.get(candidateId) ?? Promise.resolve()
+    let release
+    const current = new Promise((resolve) => { release = resolve })
+    this.#promotionLocks.set(candidateId, current)
+    try {
+      await previous
+      return await this.#promote(candidateId, token, options)
+    } finally {
+      release()
+      if (this.#promotionLocks.get(candidateId) === current) this.#promotionLocks.delete(candidateId)
+    }
+  }
+
   async dismiss(candidateId) {
     const candidate = await this.#getCandidate(candidateId)
-    this.#assertCandidateNotExpired(candidate)
+    await this.#assertCandidateNotExpired(candidate)
     if (candidate.state === 'dismissed') return structuredClone(candidate)
     if (!['discovered', 'presented'].includes(candidate.state)) {
       throw new LedgerError('invalid_state', `candidate ${candidateId} is ${candidate.state}`)
@@ -309,7 +369,11 @@ export class SessionLedger {
     if (!memory) throw new LedgerError('not_found', `memory ${memoryId} was not found`, { memoryId })
     if (memory.status === 'deleted') throw new LedgerError('invalid_state', 'deleted memory cannot be revoked')
     if (memory.status === 'revoked') return memory
-    const updated = { ...memory, status: 'revoked', revokedAt: nowIso(this.now), updatedAt: nowIso(this.now) }
+    const updated = {
+      ...transitionMemory(memory, 'revoked'),
+      revokedAt: nowIso(this.now),
+      updatedAt: nowIso(this.now),
+    }
     await this.store.put(memoryTable, memoryId, updated)
     await this.#audit('memory.revoked', memoryId, memory.workspaceId)
     return structuredClone(updated)
@@ -320,7 +384,7 @@ export class SessionLedger {
     if (!memory) throw new LedgerError('not_found', `memory ${memoryId} was not found`, { memoryId })
     if (memory.status === 'deleted') return memory
     const updated = {
-      ...memory,
+      ...transitionMemory(memory, 'deleted'),
       status: 'deleted',
       text: '',
       evidence: [],
