@@ -12,6 +12,7 @@ Run the checks locally:
 ```bash
 npm ci
 npm test
+npm run bench:generate
 npm run check
 npm run bench:m4
 ```
